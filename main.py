@@ -1,12 +1,12 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-import json
-import os
+from ortools.sat.python import cp_model
 
 app = FastAPI()
 
-# CORS (żeby działał frontend)
+# -----------------------------
+# CORS (ważne na Render + frontend)
+# -----------------------------
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -15,48 +15,95 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# MODEL danych z formularza
-class Lesson(BaseModel):
-    class_name: str
-    subject: str
-    teacher: str
+# -----------------------------
+# DANE TESTOWE
+# (na start — później zrobimy z formularza)
+# -----------------------------
+classes = ["1A", "1B"]
 
+subjects = {
+    "1A": ["Math", "English", "Physics"],
+    "1B": ["Math", "English"]
+}
 
-# test czy działa
+teachers = {
+    "Math": "Kowalski",
+    "English": "Nowak",
+    "Physics": "Wiśniewski"
+}
+
+DAYS = range(5)
+HOURS = range(4)
+
+# -----------------------------
+# API START
+# -----------------------------
 @app.get("/")
 def home():
     return {"status": "API działa"}
 
+# -----------------------------
+# GENERATOR PLANU LEKCJI
+# -----------------------------
+@app.get("/generate")
+def generate():
 
-# zapis danych
-@app.post("/save")
-def save(lesson: Lesson):
+    model = cp_model.CpModel()
 
-    # jeśli plik nie istnieje → tworzymy
-    if not os.path.exists("data.json"):
-        with open("data.json", "w") as f:
-            json.dump([], f)
+    # x[class, subject, day, hour]
+    x = {}
 
-    # wczytaj dane
-    with open("data.json", "r") as f:
-        data = json.load(f)
+    for c in classes:
+        for s in subjects[c]:
+            for d in DAYS:
+                for h in HOURS:
+                    x[(c, s, d, h)] = model.NewBoolVar(f"{c}_{s}_{d}_{h}")
 
-    # dodaj nowy wpis
-    data.append(lesson.dict())
+    # -----------------------------
+    # 1. KAŻDY PRZEDMIOT 1 RAZ W TYGODNIU
+    # -----------------------------
+    for c in classes:
+        for s in subjects[c]:
+            model.Add(
+                sum(x[(c, s, d, h)] for d in DAYS for h in HOURS) == 1
+            )
 
-    # zapisz
-    with open("data.json", "w") as f:
-        json.dump(data, f, indent=4)
+    # -----------------------------
+    # 2. MAX 1 LEKCJA W KLASIE W DANEJ GODZINIE
+    # -----------------------------
+    for c in classes:
+        for d in DAYS:
+            for h in HOURS:
+                model.Add(
+                    sum(x[(c, s, d, h)] for s in subjects[c]) <= 1
+                )
 
-    return {"status": "saved"}
+    # -----------------------------
+    # SOLVER
+    # -----------------------------
+    solver = cp_model.CpSolver()
+    status = solver.Solve(model)
 
+    if status not in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
+        return {"error": "Brak rozwiązania"}
 
-# odczyt danych
-@app.get("/lessons")
-def get_lessons():
+    # -----------------------------
+    # WYNIK
+    # -----------------------------
+    result = {}
 
-    if not os.path.exists("data.json"):
-        return []
+    for c in classes:
+        result[c] = []
 
-    with open("data.json", "r") as f:
-        return json.load(f)
+        for d in DAYS:
+            for h in HOURS:
+                for s in subjects[c]:
+                    if solver.Value(x[(c, s, d, h)]) == 1:
+                        result[c].append({
+                            "day": int(d),
+                            "hour": int(h),
+                            "subject": s,
+                            "teacher": teachers[s]
+                        })
+
+    return result
